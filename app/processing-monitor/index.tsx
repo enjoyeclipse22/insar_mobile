@@ -1,10 +1,12 @@
-import { ScrollView, Text, View, TouchableOpacity, FlatList, ActivityIndicator, Alert } from "react-native";
+import { ScrollView, Text, View, TouchableOpacity, Alert, ActivityIndicator, FlatList, Switch } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { ScreenContainer } from "@/components/screen-container";
 import { useColors } from "@/hooks/use-colors";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { useState, useEffect, useRef, useCallback } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { trpc } from "@/lib/trpc";
+import { getApiBaseUrl } from "@/constants/oauth";
 
 interface ProcessStep {
   id: number;
@@ -17,7 +19,7 @@ interface ProcessStep {
 interface LogEntry {
   id: number;
   timestamp: string;
-  level: "info" | "debug" | "warning" | "error";
+  level: "INFO" | "DEBUG" | "WARNING" | "ERROR";
   message: string;
   step?: string;
 }
@@ -35,83 +37,38 @@ interface Project {
 
 const PROJECTS_STORAGE_KEY = "insar_projects";
 
-// 处理步骤配置
+// 处理步骤配置 - 与后端 RealInSARProcessor 对应
 const PROCESSING_STEPS = [
-  { id: 1, name: "数据下载", key: "data_download" },
-  { id: 2, name: "配准", key: "coregistration" },
-  { id: 3, name: "干涉图生成", key: "interferogram_generation" },
-  { id: 4, name: "相位解缠", key: "phase_unwrapping" },
-  { id: 5, name: "形变反演", key: "deformation_inversion" },
+  { id: 1, name: "数据搜索", key: "数据搜索" },
+  { id: 2, name: "数据下载", key: "数据下载" },
+  { id: 3, name: "轨道下载", key: "轨道下载" },
+  { id: 4, name: "DEM下载", key: "DEM下载" },
+  { id: 5, name: "配准", key: "配准" },
+  { id: 6, name: "干涉图生成", key: "干涉图生成" },
+  { id: 7, name: "相位解缠", key: "相位解缠" },
+  { id: 8, name: "形变反演", key: "形变反演" },
 ];
 
-// 真实处理日志模板
-const REAL_LOGS: Record<string, LogEntry[]> = {
-  data_download: [
-    { id: 1, timestamp: "", level: "info", message: "开始搜索 Sentinel-1 SLC 数据...", step: "data_download" },
-    { id: 2, timestamp: "", level: "debug", message: "查询 ASF DAAC API: platform=Sentinel-1, bbox=105.29,28.16,110.19,32.20", step: "data_download" },
-    { id: 3, timestamp: "", level: "info", message: "找到 8 个符合条件的 SLC 产品", step: "data_download" },
-    { id: 4, timestamp: "", level: "info", message: "开始下载: S1A_IW_SLC__1SDV_20231015T104523_20231015T104550_050789_061F3A_8B2C.zip", step: "data_download" },
-    { id: 5, timestamp: "", level: "debug", message: "下载进度: 25% (1.2 GB / 4.8 GB)", step: "data_download" },
-    { id: 6, timestamp: "", level: "debug", message: "下载进度: 50% (2.4 GB / 4.8 GB)", step: "data_download" },
-    { id: 7, timestamp: "", level: "debug", message: "下载进度: 75% (3.6 GB / 4.8 GB)", step: "data_download" },
-    { id: 8, timestamp: "", level: "info", message: "SLC 数据下载完成 (4.8 GB)", step: "data_download" },
-    { id: 9, timestamp: "", level: "info", message: "开始下载 SRTM DEM 数据 (30m 分辨率)...", step: "data_download" },
-    { id: 10, timestamp: "", level: "info", message: "DEM 数据下载完成 (256 MB)", step: "data_download" },
-    { id: 11, timestamp: "", level: "info", message: "开始下载精密轨道数据...", step: "data_download" },
-    { id: 12, timestamp: "", level: "info", message: "精密轨道数据下载完成", step: "data_download" },
-    { id: 13, timestamp: "", level: "info", message: "数据下载阶段完成，耗时 45s", step: "data_download" },
-  ],
-  coregistration: [
-    { id: 14, timestamp: "", level: "info", message: "开始配准处理...", step: "coregistration" },
-    { id: 15, timestamp: "", level: "debug", message: "读取主影像: S1A_IW_SLC__1SDV_20231015T104523", step: "coregistration" },
-    { id: 16, timestamp: "", level: "debug", message: "读取辅影像: S1A_IW_SLC__1SDV_20231027T104523", step: "coregistration" },
-    { id: 17, timestamp: "", level: "info", message: "计算粗配准偏移量...", step: "coregistration" },
-    { id: 18, timestamp: "", level: "debug", message: "粗配准偏移: azimuth=12.3 pixels, range=5.7 pixels", step: "coregistration" },
-    { id: 19, timestamp: "", level: "info", message: "计算精配准偏移量 (ESD 方法)...", step: "coregistration" },
-    { id: 20, timestamp: "", level: "debug", message: "精配准 RMS 误差: 0.05 pixels", step: "coregistration" },
-    { id: 21, timestamp: "", level: "info", message: "应用重采样到辅影像...", step: "coregistration" },
-    { id: 22, timestamp: "", level: "info", message: "配准完成，RMS 误差: 0.05 pixels", step: "coregistration" },
-  ],
-  interferogram_generation: [
-    { id: 23, timestamp: "", level: "info", message: "开始生成干涉图...", step: "interferogram_generation" },
-    { id: 24, timestamp: "", level: "debug", message: "计算复数干涉图...", step: "interferogram_generation" },
-    { id: 25, timestamp: "", level: "info", message: "应用多视处理 (4x4)...", step: "interferogram_generation" },
-    { id: 26, timestamp: "", level: "debug", message: "去除平地相位...", step: "interferogram_generation" },
-    { id: 27, timestamp: "", level: "info", message: "计算相干性图...", step: "interferogram_generation" },
-    { id: 28, timestamp: "", level: "debug", message: "平均相干性: 0.72", step: "interferogram_generation" },
-    { id: 29, timestamp: "", level: "info", message: "应用 Goldstein 相位滤波...", step: "interferogram_generation" },
-    { id: 30, timestamp: "", level: "info", message: "干涉图生成完成", step: "interferogram_generation" },
-  ],
-  phase_unwrapping: [
-    { id: 31, timestamp: "", level: "info", message: "开始相位解缠...", step: "phase_unwrapping" },
-    { id: 32, timestamp: "", level: "debug", message: "检测相位不连续点...", step: "phase_unwrapping" },
-    { id: 33, timestamp: "", level: "info", message: "发现 127 个残差点", step: "phase_unwrapping" },
-    { id: 34, timestamp: "", level: "info", message: "运行 SNAPHU 算法...", step: "phase_unwrapping" },
-    { id: 35, timestamp: "", level: "debug", message: "SNAPHU 进度: 25%", step: "phase_unwrapping" },
-    { id: 36, timestamp: "", level: "debug", message: "SNAPHU 进度: 50%", step: "phase_unwrapping" },
-    { id: 37, timestamp: "", level: "debug", message: "SNAPHU 进度: 75%", step: "phase_unwrapping" },
-    { id: 38, timestamp: "", level: "info", message: "SNAPHU 解缠完成", step: "phase_unwrapping" },
-    { id: 39, timestamp: "", level: "info", message: "相位解缠完成", step: "phase_unwrapping" },
-  ],
-  deformation_inversion: [
-    { id: 40, timestamp: "", level: "info", message: "开始形变反演...", step: "deformation_inversion" },
-    { id: 41, timestamp: "", level: "debug", message: "转换相位到距离变化...", step: "deformation_inversion" },
-    { id: 42, timestamp: "", level: "info", message: "投影到 LOS 方向...", step: "deformation_inversion" },
-    { id: 43, timestamp: "", level: "debug", message: "入射角: 39.2°, 方位角: -12.5°", step: "deformation_inversion" },
-    { id: 44, timestamp: "", level: "info", message: "应用大气校正 (ERA5 数据)...", step: "deformation_inversion" },
-    { id: 45, timestamp: "", level: "debug", message: "大气相位 RMS: 0.8 rad", step: "deformation_inversion" },
-    { id: 46, timestamp: "", level: "info", message: "生成形变图...", step: "deformation_inversion" },
-    { id: 47, timestamp: "", level: "info", message: "形变范围: -45.2mm 至 +38.7mm", step: "deformation_inversion" },
-    { id: 48, timestamp: "", level: "info", message: "平均形变: -2.1mm", step: "deformation_inversion" },
-    { id: 49, timestamp: "", level: "info", message: "形变反演完成", step: "deformation_inversion" },
-    { id: 50, timestamp: "", level: "info", message: "InSAR 处理全部完成！", step: "deformation_inversion" },
-  ],
+// 步骤名称到索引的映射
+const STEP_INDEX_MAP: Record<string, number> = {
+  "创建工作目录": -1,
+  "初始化": -1,
+  "数据搜索": 0,
+  "数据下载": 1,
+  "轨道下载": 2,
+  "DEM下载": 3,
+  "配准": 4,
+  "干涉图生成": 5,
+  "相位解缠": 6,
+  "形变反演": 7,
+  "完成": 8,
+  "处理失败": -1,
 };
 
 export default function ProcessingMonitorScreen() {
   const router = useRouter();
   const colors = useColors();
-  const { projectId, stepName } = useLocalSearchParams();
+  const { projectId, taskId: initialTaskId } = useLocalSearchParams();
   
   const [project, setProject] = useState<Project | null>(null);
   const [steps, setSteps] = useState<ProcessStep[]>(
@@ -122,12 +79,17 @@ export default function ProcessingMonitorScreen() {
   const [isPaused, setIsPaused] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [totalProgress, setTotalProgress] = useState(0);
-  const [currentStepIndex, setCurrentStepIndex] = useState(-1);
+  const [currentStepName, setCurrentStepName] = useState("");
+  const [taskId, setTaskId] = useState<string | null>(initialTaskId as string || null);
+  const [taskStatus, setTaskStatus] = useState<string>("pending");
+  const [error, setError] = useState<string | null>(null);
   
   const flatListRef = useRef<FlatList>(null);
-  const processingRef = useRef<boolean>(false);
-  const pausedRef = useRef<boolean>(false);
-  const logIdRef = useRef<number>(0);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastLogCountRef = useRef<number>(0);
+
+  // tRPC mutations
+  const cancelProcessingMutation = trpc.realInsar.cancelProcessing.useMutation();
 
   // 加载项目信息
   useEffect(() => {
@@ -141,11 +103,14 @@ export default function ProcessingMonitorScreen() {
             setProject(found);
             setIsProcessing(found.status === "processing");
             setTotalProgress(found.progress);
-            
-            // 如果正在处理，开始模拟日志流
-            if (found.status === "processing") {
-              startRealTimeLogging();
-            }
+          }
+        }
+        
+        // 获取保存的 taskId
+        if (!taskId) {
+          const savedTaskId = await AsyncStorage.getItem(`task_${projectId}`);
+          if (savedTaskId) {
+            setTaskId(savedTaskId);
           }
         }
       } catch (error) {
@@ -156,129 +121,132 @@ export default function ProcessingMonitorScreen() {
     loadProject();
     
     return () => {
-      processingRef.current = false;
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
     };
   }, [projectId]);
 
-  // 格式化时间戳
-  const formatTimestamp = () => {
-    const now = new Date();
-    return now.toISOString().replace("T", " ").substring(0, 19);
-  };
-
-  // 添加日志
-  const addLog = useCallback((log: Omit<LogEntry, "id" | "timestamp">) => {
-    logIdRef.current += 1;
-    const newLog: LogEntry = {
-      ...log,
-      id: logIdRef.current,
-      timestamp: formatTimestamp(),
-    };
-    setLogs(prev => [...prev, newLog]);
-    
-    // 自动滚动到底部
-    if (autoScroll && flatListRef.current) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+  // 当有 taskId 时开始轮询
+  useEffect(() => {
+    if (taskId) {
+      startPolling();
     }
-  }, [autoScroll]);
-
-  // 开始真实时间日志流
-  const startRealTimeLogging = useCallback(async () => {
-    if (processingRef.current) return;
-    processingRef.current = true;
     
-    const stepKeys = ["data_download", "coregistration", "interferogram_generation", "phase_unwrapping", "deformation_inversion"];
-    const progressPerStep = 100 / stepKeys.length;
-    
-    for (let stepIndex = 0; stepIndex < stepKeys.length; stepIndex++) {
-      if (!processingRef.current) break;
-      
-      const stepKey = stepKeys[stepIndex];
-      const stepLogs = REAL_LOGS[stepKey] || [];
-      
-      // 更新当前步骤
-      setCurrentStepIndex(stepIndex);
-      setSteps(prev => prev.map((s, idx) => ({
-        ...s,
-        status: idx < stepIndex ? "completed" : idx === stepIndex ? "processing" : "pending",
-        progress: idx < stepIndex ? 100 : idx === stepIndex ? 0 : 0,
-      })));
-      
-      // 逐条输出日志
-      for (let logIndex = 0; logIndex < stepLogs.length; logIndex++) {
-        if (!processingRef.current) break;
-        
-        // 检查是否暂停
-        while (pausedRef.current && processingRef.current) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        
-        const log = stepLogs[logIndex];
-        addLog({
-          level: log.level,
-          message: log.message,
-          step: log.step,
-        });
-        
-        // 更新步骤进度
-        const stepProgress = ((logIndex + 1) / stepLogs.length) * 100;
-        setSteps(prev => prev.map((s, idx) => 
-          idx === stepIndex ? { ...s, progress: stepProgress } : s
-        ));
-        
-        // 更新总进度
-        const newTotalProgress = Math.round(stepIndex * progressPerStep + (stepProgress / 100) * progressPerStep);
-        setTotalProgress(newTotalProgress);
-        
-        // 随机延迟模拟真实处理
-        const delay = log.level === "debug" ? 300 + Math.random() * 500 : 500 + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
       }
-      
-      // 标记步骤完成
-      setSteps(prev => prev.map((s, idx) => 
-        idx === stepIndex ? { ...s, status: "completed", progress: 100 } : s
-      ));
+    };
+  }, [taskId]);
+
+  // 轮询后端获取状态和日志
+  const startPolling = () => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
     }
-    
-    // 处理完成
-    if (processingRef.current) {
-      setTotalProgress(100);
-      setIsProcessing(false);
+
+    const pollData = async () => {
+      if (!taskId) return;
       
-      // 更新本地存储
       try {
-        const stored = await AsyncStorage.getItem(PROJECTS_STORAGE_KEY);
-        if (stored) {
-          const projects: Project[] = JSON.parse(stored);
-          const index = projects.findIndex(p => p.id.toString() === projectId);
-          if (index !== -1) {
-            projects[index].status = "completed";
-            projects[index].progress = 100;
-            await AsyncStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+        // 获取处理状态
+        const apiBase = getApiBaseUrl();
+        const statusResponse = await fetch(
+          `${apiBase}/api/trpc/realInsar.getStatus?input=${encodeURIComponent(JSON.stringify({ json: { taskId } }))}`
+        );
+        const statusData = await statusResponse.json();
+        
+        if (statusData?.result?.data?.json) {
+          const status = statusData.result.data.json;
+          
+          setTaskStatus(status.status);
+          setTotalProgress(status.progress || 0);
+          setCurrentStepName(status.currentStep || "");
+          
+          // 更新步骤状态
+          const currentStepIndex = STEP_INDEX_MAP[status.currentStep] ?? -1;
+          setSteps(prev => prev.map((s, idx) => ({
+            ...s,
+            status: idx < currentStepIndex ? "completed" : 
+                   idx === currentStepIndex ? "processing" : "pending",
+            progress: idx < currentStepIndex ? 100 : 
+                     idx === currentStepIndex ? 50 : 0,
+          })));
+          
+          // 更新本地项目状态
+          if (status.status === "completed" || status.status === "failed") {
+            setIsProcessing(false);
+            
+            // 更新本地存储
+            const stored = await AsyncStorage.getItem(PROJECTS_STORAGE_KEY);
+            if (stored) {
+              const projects: Project[] = JSON.parse(stored);
+              const index = projects.findIndex(p => p.id.toString() === projectId);
+              if (index !== -1) {
+                projects[index].status = status.status;
+                projects[index].progress = status.status === "completed" ? 100 : projects[index].progress;
+                await AsyncStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+              }
+            }
+            
+            if (status.status === "completed") {
+              setSteps(prev => prev.map(s => ({ ...s, status: "completed", progress: 100 })));
+            }
+            
+            if (status.error) {
+              setError(status.error);
+            }
+            
+            // 停止轮询
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current);
+            }
           }
         }
-        await AsyncStorage.removeItem(`task_${projectId}`);
-      } catch (error) {
-        console.error("Failed to update project status:", error);
-      }
-    }
-    
-    processingRef.current = false;
-  }, [projectId, addLog]);
 
-  // 暂停/继续处理
-  const togglePause = () => {
-    pausedRef.current = !pausedRef.current;
-    setIsPaused(pausedRef.current);
+        // 获取日志
+        const logsResponse = await fetch(
+          `${apiBase}/api/trpc/realInsar.getLogs?input=${encodeURIComponent(JSON.stringify({ json: { 
+            taskId, 
+            offset: 0, 
+            limit: 500 
+          } }))}`
+        );
+        const logsData = await logsResponse.json();
+        
+        if (logsData?.result?.data?.json?.logs) {
+          const newLogs: LogEntry[] = logsData.result.data.json.logs.map((log: any, index: number) => ({
+            id: index,
+            timestamp: new Date(log.timestamp).toLocaleTimeString(),
+            level: log.level,
+            message: log.message,
+            step: log.step,
+          }));
+          
+          // 只有当日志数量变化时才更新
+          if (newLogs.length !== lastLogCountRef.current) {
+            setLogs(newLogs);
+            lastLogCountRef.current = newLogs.length;
+            
+            // 自动滚动到底部
+            if (autoScroll && flatListRef.current && newLogs.length > 0) {
+              setTimeout(() => {
+                flatListRef.current?.scrollToEnd({ animated: true });
+              }, 100);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+      }
+    };
+
+    // 立即执行一次
+    pollData();
     
-    if (pausedRef.current) {
-      addLog({ level: "warning", message: "处理已暂停" });
-    } else {
-      addLog({ level: "info", message: "处理已继续" });
-    }
+    // 每 1.5 秒轮询一次
+    pollingRef.current = setInterval(pollData, 1500);
   };
 
   // 取消处理
@@ -292,12 +260,19 @@ export default function ProcessingMonitorScreen() {
           text: "是",
           style: "destructive",
           onPress: async () => {
-            processingRef.current = false;
-            setIsProcessing(false);
-            addLog({ level: "error", message: "处理已被用户取消" });
-            
-            // 更新本地存储
             try {
+              if (taskId) {
+                await cancelProcessingMutation.mutateAsync({ taskId });
+              }
+              
+              // 停止轮询
+              if (pollingRef.current) {
+                clearInterval(pollingRef.current);
+              }
+              
+              setIsProcessing(false);
+              
+              // 更新本地存储
               const stored = await AsyncStorage.getItem(PROJECTS_STORAGE_KEY);
               if (stored) {
                 const projects: Project[] = JSON.parse(stored);
@@ -309,11 +284,12 @@ export default function ProcessingMonitorScreen() {
                 }
               }
               await AsyncStorage.removeItem(`task_${projectId}`);
+              
+              Alert.alert("已取消", "处理任务已取消");
+              router.back();
             } catch (error) {
-              console.error("Failed to update project status:", error);
+              Alert.alert("错误", `取消失败: ${error}`);
             }
-            
-            router.back();
           },
         },
       ]
@@ -323,10 +299,19 @@ export default function ProcessingMonitorScreen() {
   // 导出日志
   const exportLogs = () => {
     const logText = logs.map(log => 
-      `[${log.timestamp}] [${log.level.toUpperCase()}] ${log.message}`
+      `[${log.timestamp}] [${log.level}] [${log.step}] ${log.message}`
     ).join("\n");
     
-    Alert.alert("导出日志", `共 ${logs.length} 条日志\n\n${logText.substring(0, 500)}...`);
+    Alert.alert(
+      "导出日志", 
+      `共 ${logs.length} 条日志\n\n${logText.substring(0, 1000)}${logText.length > 1000 ? "..." : ""}`
+    );
+  };
+
+  // 清空日志显示
+  const clearLogs = () => {
+    setLogs([]);
+    lastLogCountRef.current = 0;
   };
 
   // 渲染步骤
@@ -350,307 +335,193 @@ export default function ProcessingMonitorScreen() {
     };
 
     return (
-      <View
-        key={step.id}
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          paddingVertical: 12,
-          paddingHorizontal: 16,
-          backgroundColor: step.status === "processing" ? `${colors.primary}10` : "transparent",
-          borderRadius: 8,
-          marginBottom: 4,
-        }}
-      >
-        {step.status === "processing" ? (
-          <ActivityIndicator size="small" color={colors.primary} style={{ marginRight: 12 }} />
-        ) : (
-          <MaterialIcons name={getStatusIcon()} size={20} color={getStatusColor()} style={{ marginRight: 12 }} />
-        )}
-        <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 14, fontWeight: "500", color: colors.foreground }}>
-            {step.name}
-          </Text>
-          {step.status === "processing" && (
-            <View style={{ marginTop: 4 }}>
-              <View style={{ height: 3, backgroundColor: colors.border, borderRadius: 2, overflow: "hidden" }}>
-                <View
-                  style={{
-                    height: "100%",
-                    width: `${step.progress || 0}%`,
-                    backgroundColor: colors.primary,
-                    borderRadius: 2,
-                  }}
-                />
-              </View>
-            </View>
-          )}
-        </View>
-        {step.duration && (
-          <Text style={{ fontSize: 12, color: colors.muted }}>{step.duration}s</Text>
+      <View key={step.id} className="flex-row items-center py-2">
+        <MaterialIcons name={getStatusIcon()} size={20} color={getStatusColor()} />
+        <Text className="text-foreground ml-2 flex-1">{step.name}</Text>
+        {step.status === "processing" && (
+          <ActivityIndicator size="small" color={colors.primary} />
         )}
       </View>
     );
   };
 
-  // 渲染日志
-  const renderLog = (item: LogEntry) => {
+  // 渲染日志项
+  const renderLogItem = ({ item }: { item: LogEntry }) => {
     const getLevelColor = () => {
       switch (item.level) {
-        case "error": return colors.error;
-        case "warning": return colors.warning;
-        case "debug": return colors.muted;
+        case "ERROR": return colors.error;
+        case "WARNING": return colors.warning;
+        case "DEBUG": return colors.muted;
         default: return colors.foreground;
       }
     };
 
     const getLevelBgColor = () => {
       switch (item.level) {
-        case "error": return `${colors.error}20`;
-        case "warning": return `${colors.warning}20`;
+        case "ERROR": return colors.error + "20";
+        case "WARNING": return colors.warning + "20";
         default: return "transparent";
       }
     };
 
     return (
-      <View
-        style={{
-          paddingVertical: 6,
-          paddingHorizontal: 12,
-          backgroundColor: getLevelBgColor(),
-          borderBottomWidth: 0.5,
-          borderBottomColor: colors.border,
-        }}
+      <View 
+        className="px-3 py-2 border-b border-border"
+        style={{ backgroundColor: getLevelBgColor() }}
       >
-        <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
-          <Text style={{ fontSize: 10, color: colors.muted, width: 140, fontFamily: "monospace" }}>
-            {item.timestamp}
-          </Text>
-          <Text style={{ 
-            fontSize: 10, 
-            color: getLevelColor(), 
-            width: 50, 
-            fontWeight: "600",
-            fontFamily: "monospace",
-          }}>
-            [{item.level.toUpperCase()}]
-          </Text>
-          <Text style={{ 
-            fontSize: 11, 
-            color: getLevelColor(), 
-            flex: 1,
-            lineHeight: 16,
-          }}>
-            {item.message}
-          </Text>
+        <View className="flex-row items-center mb-1">
+          <Text className="text-muted text-xs">{item.timestamp}</Text>
+          <View 
+            className="ml-2 px-2 py-0.5 rounded"
+            style={{ backgroundColor: getLevelColor() + "30" }}
+          >
+            <Text style={{ color: getLevelColor() }} className="text-xs font-medium">
+              {item.level}
+            </Text>
+          </View>
+          {item.step && (
+            <Text className="text-muted text-xs ml-2">[{item.step}]</Text>
+          )}
         </View>
+        <Text className="text-foreground text-sm">{item.message}</Text>
       </View>
     );
   };
 
   return (
-    <ScreenContainer className="p-0">
-      <View style={{ backgroundColor: colors.background, flex: 1 }}>
-        {/* Header */}
-        <View
-          style={{
-            backgroundColor: colors.primary,
-            paddingHorizontal: 24,
-            paddingVertical: 16,
-            paddingTop: 12,
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <TouchableOpacity onPress={() => router.back()}>
-            <MaterialIcons name="arrow-back" size={24} color="#FFFFFF" />
-          </TouchableOpacity>
-          <Text style={{ fontSize: 18, fontWeight: "700", color: "#FFFFFF" }}>
-            处理监控
-          </Text>
-          <View style={{ width: 24 }} />
+    <ScreenContainer>
+      {/* Header */}
+      <View 
+        className="flex-row items-center justify-between px-4 py-3"
+        style={{ backgroundColor: colors.primary }}
+      >
+        <TouchableOpacity onPress={() => router.back()} className="p-2">
+          <MaterialIcons name="arrow-back" size={24} color="white" />
+        </TouchableOpacity>
+        <Text className="text-white text-lg font-semibold">处理监控</Text>
+        <View className="w-10" />
+      </View>
+
+      {/* Progress Section */}
+      <View className="m-4 p-4 rounded-xl bg-surface border border-border">
+        <View className="flex-row items-center justify-between mb-2">
+          <Text className="text-foreground font-semibold">总体进度</Text>
+          <Text className="text-primary font-bold">{totalProgress}%</Text>
         </View>
-
-        {/* Content */}
-        <ScrollView style={{ flex: 1 }}>
-          {/* Overall Progress */}
-          <View
-            style={{
-              backgroundColor: colors.surface,
-              margin: 12,
-              borderRadius: 12,
-              padding: 16,
+        <View className="h-3 bg-border rounded-full overflow-hidden">
+          <View 
+            className="h-full rounded-full"
+            style={{ 
+              width: `${totalProgress}%`,
+              backgroundColor: taskStatus === "failed" ? colors.error : colors.primary,
             }}
-          >
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <Text style={{ fontSize: 14, fontWeight: "600", color: colors.foreground }}>
-                总体进度
-              </Text>
-              <Text style={{ fontSize: 16, fontWeight: "700", color: colors.primary }}>
-                {totalProgress}%
-              </Text>
-            </View>
-            <View style={{ height: 8, backgroundColor: colors.border, borderRadius: 4, overflow: "hidden" }}>
-              <View
-                style={{
-                  height: "100%",
-                  width: `${totalProgress}%`,
-                  backgroundColor: colors.primary,
-                  borderRadius: 4,
-                }}
-              />
-            </View>
-            {project && (
-              <Text style={{ fontSize: 11, color: colors.muted, marginTop: 8 }}>
-                项目: {project.name} | 区域: {project.location || "重庆"}
-              </Text>
-            )}
+          />
+        </View>
+        <Text className="text-muted text-sm mt-2">
+          项目: {project?.name || projectId} | 区域: {project?.location || "未知"}
+        </Text>
+        {currentStepName && (
+          <Text className="text-primary text-sm mt-1">当前步骤: {currentStepName}</Text>
+        )}
+        {error && (
+          <Text className="text-error text-sm mt-1">错误: {error}</Text>
+        )}
+      </View>
+
+      {/* Steps Section */}
+      <View className="mx-4 mb-2">
+        <Text className="text-foreground font-semibold mb-2">处理步骤</Text>
+        <View className="bg-surface rounded-xl border border-border p-3">
+          {steps.map((step, index) => renderStep(step, index))}
+        </View>
+      </View>
+
+      {/* Logs Section */}
+      <View className="flex-1 mx-4 mb-4">
+        <View className="flex-row items-center justify-between mb-2">
+          <Text className="text-foreground font-semibold">实时日志 (WebSocket)</Text>
+          <View className="flex-row items-center">
+            <Text className="text-muted text-sm mr-2">自动滚动</Text>
+            <Switch
+              value={autoScroll}
+              onValueChange={setAutoScroll}
+              trackColor={{ false: colors.border, true: colors.primary + "50" }}
+              thumbColor={autoScroll ? colors.primary : colors.muted}
+            />
           </View>
-
-          {/* Processing Steps */}
-          <View style={{ paddingVertical: 8 }}>
-            <Text style={{ fontSize: 14, fontWeight: "600", color: colors.foreground, marginHorizontal: 24, marginBottom: 8 }}>
-              处理步骤
-            </Text>
-            {steps.map(renderStep)}
-          </View>
-
-          {/* Processing Logs */}
-          <View style={{ paddingVertical: 16 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginHorizontal: 24 }}>
-              <Text style={{ fontSize: 14, fontWeight: "600", color: colors.foreground }}>
-                实时日志 (WebSocket)
-              </Text>
-              <TouchableOpacity
-                onPress={() => setAutoScroll(!autoScroll)}
-                style={{
-                  paddingHorizontal: 8,
-                  paddingVertical: 4,
-                  backgroundColor: autoScroll ? colors.primary : colors.surface,
-                  borderRadius: 6,
-                }}
-              >
-                <Text style={{ fontSize: 10, color: autoScroll ? "#FFFFFF" : colors.primary, fontWeight: "600" }}>
-                  {autoScroll ? "自动滚动" : "手动滚动"}
-                </Text>
-              </TouchableOpacity>
+        </View>
+        
+        <View className="flex-1 bg-surface rounded-xl border border-border overflow-hidden">
+          {logs.length === 0 ? (
+            <View className="flex-1 items-center justify-center p-8">
+              <ActivityIndicator size="large" color={colors.primary} />
+              <Text className="text-muted mt-4">等待日志...</Text>
             </View>
-            <View
-              style={{
-                backgroundColor: colors.surface,
-                marginHorizontal: 12,
-                borderRadius: 12,
-                overflow: "hidden",
-                maxHeight: 300,
-              }}
-            >
-              {logs.length === 0 ? (
-                <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingVertical: 40 }}>
-                  <ActivityIndicator size="large" color={colors.primary} />
-                  <Text style={{ fontSize: 12, color: colors.muted, marginTop: 8 }}>
-                    等待日志...
-                  </Text>
-                </View>
-              ) : (
-                <FlatList
-                  ref={flatListRef}
-                  data={logs}
-                  renderItem={({ item }) => renderLog(item)}
-                  keyExtractor={(item) => item.id.toString()}
-                  scrollEnabled={true}
-                  nestedScrollEnabled={true}
-                  onContentSizeChange={() => {
-                    if (autoScroll && flatListRef.current) {
-                      flatListRef.current.scrollToEnd({ animated: true });
-                    }
-                  }}
-                />
-              )}
-            </View>
+          ) : (
+            <FlatList
+              ref={flatListRef}
+              data={logs}
+              renderItem={renderLogItem}
+              keyExtractor={(item) => item.id.toString()}
+              showsVerticalScrollIndicator={true}
+              onScrollBeginDrag={() => setAutoScroll(false)}
+            />
+          )}
+        </View>
+      </View>
 
-            {/* Log Controls */}
-            <View style={{ flexDirection: "row", gap: 8, marginHorizontal: 12, marginTop: 12 }}>
-              <TouchableOpacity
-                style={{
-                  flex: 1,
-                  backgroundColor: colors.surface,
-                  borderRadius: 8,
-                  paddingVertical: 8,
-                  alignItems: "center",
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                }}
-                onPress={() => setLogs([])}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "600", color: colors.foreground }}>
-                  清空日志
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={{
-                  flex: 1,
-                  backgroundColor: colors.surface,
-                  borderRadius: 8,
-                  paddingVertical: 8,
-                  alignItems: "center",
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                }}
-                onPress={exportLogs}
-              >
-                <Text style={{ fontSize: 12, fontWeight: "600", color: colors.foreground }}>
-                  导出日志
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </ScrollView>
-
-        {/* Action Buttons */}
-        <View
-          style={{
-            paddingHorizontal: 24,
-            paddingVertical: 16,
-            borderTopWidth: 1,
-            borderTopColor: colors.border,
-            flexDirection: "row",
-            gap: 12,
-          }}
+      {/* Action Buttons */}
+      <View className="flex-row mx-4 mb-4 space-x-3">
+        <TouchableOpacity
+          className="flex-1 py-3 rounded-xl items-center border border-border"
+          onPress={clearLogs}
         >
+          <Text className="text-foreground font-medium">清空日志</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          className="flex-1 py-3 rounded-xl items-center border border-border"
+          onPress={exportLogs}
+        >
+          <Text className="text-foreground font-medium">导出日志</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Control Buttons */}
+      {(taskStatus === "processing" || taskStatus === "pending") && (
+        <View className="flex-row mx-4 mb-6 space-x-3">
           <TouchableOpacity
-            style={{
-              flex: 1,
-              backgroundColor: isPaused ? colors.warning : colors.surface,
-              borderRadius: 12,
-              paddingVertical: 12,
-              alignItems: "center",
-              borderWidth: 1,
-              borderColor: isPaused ? colors.warning : colors.border,
-            }}
-            onPress={togglePause}
-            disabled={!isProcessing}
+            className="flex-1 py-4 rounded-xl items-center"
+            style={{ backgroundColor: colors.primary }}
+            onPress={() => setIsPaused(!isPaused)}
           >
-            <Text style={{ fontSize: 14, fontWeight: "600", color: isPaused ? "#FFFFFF" : colors.primary }}>
+            <Text className="text-white font-semibold">
               {isPaused ? "继续" : "暂停"}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={{
-              flex: 1,
-              backgroundColor: colors.error,
-              borderRadius: 12,
-              paddingVertical: 12,
-              alignItems: "center",
-            }}
+            className="flex-1 py-4 rounded-xl items-center"
+            style={{ backgroundColor: colors.error }}
             onPress={handleCancel}
           >
-            <Text style={{ fontSize: 14, fontWeight: "600", color: "#FFFFFF" }}>
-              取消
+            <Text className="text-white font-semibold">取消</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Completed/Failed Status */}
+      {(taskStatus === "completed" || taskStatus === "failed") && (
+        <View className="mx-4 mb-6">
+          <TouchableOpacity
+            className="py-4 rounded-xl items-center"
+            style={{ backgroundColor: taskStatus === "completed" ? colors.success : colors.error }}
+            onPress={() => router.back()}
+          >
+            <Text className="text-white font-semibold">
+              {taskStatus === "completed" ? "处理完成 - 返回" : "处理失败 - 返回"}
             </Text>
           </TouchableOpacity>
         </View>
-      </View>
+      )}
     </ScreenContainer>
   );
 }

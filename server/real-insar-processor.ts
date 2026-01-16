@@ -352,11 +352,9 @@ export class RealInSARProcessor extends EventEmitter {
 
     let results = await response.json();
     
-    // ASF API 返回的是嵌套数组 [[...]]，需要展平
-    if (Array.isArray(results) && results.length > 0 && Array.isArray(results[0])) {
-      results = results.flat();
-      this.log("DEBUG", "数据搜索", `展平后找到 ${results.length} 个产品`);
-    }
+    // ASF API 返回的是双层嵌套数组 [[{...}, {...}]]，需要完全展平
+    results = this.flattenASFResults(results);
+    this.log("DEBUG", "数据搜索", `展平后找到 ${results.length} 个产品`);
 
     if (!Array.isArray(results) || results.length === 0) {
       // 尝试扩大搜索范围
@@ -390,7 +388,8 @@ export class RealInSARProcessor extends EventEmitter {
       });
 
       if (expandedResponse.ok) {
-        const expandedResults = await expandedResponse.json();
+        let expandedResults = await expandedResponse.json();
+        expandedResults = this.flattenASFResults(expandedResults);
         if (Array.isArray(expandedResults) && expandedResults.length > 0) {
           this.log("INFO", "数据搜索", `扩大搜索后找到 ${expandedResults.length} 个产品`);
           return this.parseSearchResults(expandedResults);
@@ -408,6 +407,27 @@ export class RealInSARProcessor extends EventEmitter {
     this.log("INFO", "数据搜索", `找到 ${results.length} 个 Sentinel-1 产品`);
 
     return this.parseSearchResults(results);
+  }
+
+  // 展平 ASF API 返回的嵌套数组结构
+  private flattenASFResults(data: any): any[] {
+    // ASF API 返回格式: [[{...}, {...}, ...]] - 双层嵌套数组
+    // 需要递归展平直到得到对象数组
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    
+    // 如果第一个元素是数组，继续展平
+    if (data.length > 0 && Array.isArray(data[0])) {
+      return data.flat(2); // 展平两层
+    }
+    
+    // 如果第一个元素是对象，说明已经是正确格式
+    if (data.length > 0 && typeof data[0] === 'object' && !Array.isArray(data[0])) {
+      return data;
+    }
+    
+    return data.flat(10); // 安全起见，展平多层
   }
 
   private parseSearchResults(results: any[]): ASFSearchResult[] {

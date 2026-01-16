@@ -739,3 +739,19 @@
 - 处理监控页面添加 findTaskForProject() 函数
 - 数据管理页面使用 realInsar.listTasks API
 - 后端在 SLC < 2 时抛出详细错误信息
+
+
+
+## 第 21 阶段：ASF API 解析修复和重庆项目验证
+
+### ASF API 解析修复
+- [x] 发现 ASF API 返回双层嵌套数组 [[{...}, {...}]] 格式
+- [x] 添加 flattenASFResults 方法正确展平嵌套数组
+- [x] 修复数据搜索和扩大搜索范围的解析逻辑
+- [x] 验证重庆区域成功找到 20 个 Sentinel-1 产品
+
+### 前端状态同步修复
+- [x] 修复 getApiBaseUrl 函数支持移动端
+- [x] 修复处理监控页面自动获取 taskId
+- [x] 修复数据管理页面使用 realInsar.listTasks API
+- [x] 修复项目列表页面从 AsyncStorage 加载真实项目

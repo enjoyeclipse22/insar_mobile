@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { trpc } from "@/lib/trpc";
 import { getApiBaseUrl } from "@/constants/oauth";
+import { DataAvailabilityCheck } from "@/components/data-availability-check";
 
 interface ProcessStep {
   id: number;
@@ -79,6 +80,7 @@ export default function ProjectDetailScreen() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isStartingProcessing, setIsStartingProcessing] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [dataAvailable, setDataAvailable] = useState<boolean | null>(null);
   const [steps, setSteps] = useState<ProcessStep[]>(DEFAULT_STEPS);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<string>("");
@@ -543,6 +545,22 @@ export default function ProjectDetailScreen() {
           </View>
         </View>
 
+        {/* Data Availability Check */}
+        {project.status !== "processing" && project.status !== "completed" && project.bounds && (
+          <View className="mx-4 mb-4">
+            <Text className="text-foreground text-lg font-semibold mb-3">数据可用性检查</Text>
+            <DataAvailabilityCheck
+              bounds={project.bounds}
+              startDate={project.startDate || new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0]}
+              endDate={project.endDate || new Date().toISOString().split("T")[0]}
+              satellite={project.satellite || "Sentinel-1"}
+              orbitDirection={project.orbitDirection || "both"}
+              onResult={(result) => setDataAvailable(result.available)}
+              autoCheck={true}
+            />
+          </View>
+        )}
+
         {/* Processing Steps */}
         <View className="mx-4 mb-4">
           <Text className="text-foreground text-lg font-semibold mb-3">处理流程</Text>
@@ -593,7 +611,10 @@ export default function ProjectDetailScreen() {
           {project.status !== "processing" && (
             <TouchableOpacity
               className="py-4 rounded-xl items-center"
-              style={{ backgroundColor: colors.primary }}
+              style={{ 
+                backgroundColor: dataAvailable === false ? colors.warning : colors.primary,
+                opacity: isStartingProcessing ? 0.7 : 1
+              }}
               onPress={handleStartProcessing}
               disabled={isStartingProcessing}
             >
@@ -601,8 +622,14 @@ export default function ProjectDetailScreen() {
                 <ActivityIndicator color="white" />
               ) : (
                 <View className="flex-row items-center">
-                  <MaterialIcons name="play-arrow" size={24} color="white" />
-                  <Text className="text-white font-semibold ml-2">开始处理</Text>
+                  <MaterialIcons 
+                    name={dataAvailable === false ? "warning" : "play-arrow"} 
+                    size={24} 
+                    color="white" 
+                  />
+                  <Text className="text-white font-semibold ml-2">
+                    {dataAvailable === false ? "数据不足，仍可尝试" : "开始处理"}
+                  </Text>
                 </View>
               )}
             </TouchableOpacity>

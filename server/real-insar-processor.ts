@@ -955,12 +955,129 @@ export class RealInSARProcessor extends EventEmitter {
       };
 
       const request = protocol.get(url, options, (response) => {
-        // 处理重定向
-        if (response.statusCode === 301 || response.statusCode === 302) {
+        // 处理重定向 (301, 302, 303, 307, 308)
+        if (
+          response.statusCode === 301 ||
+          response.statusCode === 302 ||
+          response.statusCode === 303 ||
+          response.statusCode === 307 ||
+          response.statusCode === 308
+        ) {
           const redirectUrl = response.headers.location;
           if (redirectUrl) {
-            this.log("DEBUG", step, `重定向到: ${redirectUrl}`);
-            this.downloadFile(redirectUrl, destPath, step)
+            this.log("DEBUG", step, `HTTP ${response.statusCode} 重定向到: ${redirectUrl}`);
+            // 对于重定向，可能不需要认证头（比如 S3 签名 URL）
+            this.downloadFileWithRedirect(redirectUrl, destPath, step, 0)
+              .then(resolve)
+              .catch(reject);
+            return;
+          }
+        }
+
+        if (response.statusCode !== 200) {
+          reject(new Error(`下载失败: HTTP ${response.statusCode}`));
+          return;
+        }
+
+        const totalSize = parseInt(response.headers["content-length"] || "0", 10);
+        let downloadedSize = 0;
+        let lastProgress = 0;
+
+        const file = fs.createWriteStream(destPath);
+
+        response.on("data", (chunk: Buffer) => {
+          downloadedSize += chunk.length;
+          file.write(chunk);
+
+          if (totalSize > 0) {
+            const progress = Math.floor((downloadedSize / totalSize) * 100);
+            if (progress >= lastProgress + 10) {
+              lastProgress = progress;
+              const sizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
+              const totalMB = (totalSize / 1024 / 1024).toFixed(2);
+              this.log("INFO", step, `下载进度: ${sizeMB}MB / ${totalMB}MB (${progress}%)`);
+            }
+          }
+        });
+
+        response.on("end", () => {
+          file.end();
+          const finalSizeMB = (downloadedSize / 1024 / 1024).toFixed(2);
+          this.log("INFO", step, `下载完成: ${finalSizeMB}MB`);
+          resolve();
+        });
+
+        response.on("error", (err) => {
+          file.close();
+          if (fs.existsSync(destPath)) {
+            fs.unlinkSync(destPath);
+          }
+          reject(err);
+        });
+      });
+
+      request.on("error", (err) => {
+        reject(err);
+      });
+
+      request.setTimeout(300000, () => {
+        request.destroy();
+        reject(new Error("下载超时"));
+      });
+    });
+  }
+
+  /**
+   * 处理重定向后的下载
+   * ASF 下载需要通过 NASA Earthdata OAuth 认证
+   * 重定向链:
+   * 1. datapool.asf.alaska.edu -> 307 -> sentinel1.asf.alaska.edu
+   * 2. sentinel1.asf.alaska.edu -> 302 -> urs.earthdata.nasa.gov/oauth/authorize
+   * 3. 需要带上 Bearer Token 认证
+   */
+  private async downloadFileWithRedirect(
+    url: string,
+    destPath: string,
+    step: string,
+    redirectCount: number
+  ): Promise<void> {
+    // 防止无限重定向
+    const MAX_REDIRECTS = 10;
+    if (redirectCount >= MAX_REDIRECTS) {
+      throw new Error(`超过最大重定向次数 (${MAX_REDIRECTS})`);
+    }
+
+    return new Promise((resolve, reject) => {
+      const protocol = url.startsWith("https") ? https : http;
+      const ASF_API_TOKEN = process.env.ASF_API_TOKEN;
+
+      this.log("DEBUG", step, `下载重定向 URL (第${redirectCount + 1}次): ${url.substring(0, 100)}...`);
+
+      // 对于 ASF/NASA 域名，保留认证头
+      const isASFDomain = url.includes('asf.alaska.edu') || 
+                          url.includes('earthdata.nasa.gov') ||
+                          url.includes('urs.earthdata.nasa.gov');
+      
+      const options: https.RequestOptions = {};
+      if (isASFDomain && ASF_API_TOKEN) {
+        options.headers = {
+          Authorization: `Bearer ${ASF_API_TOKEN}`,
+        };
+      }
+
+      const request = protocol.get(url, options, (response) => {
+        // 继续处理重定向
+        if (
+          response.statusCode === 301 ||
+          response.statusCode === 302 ||
+          response.statusCode === 303 ||
+          response.statusCode === 307 ||
+          response.statusCode === 308
+        ) {
+          const redirectUrl = response.headers.location;
+          if (redirectUrl) {
+            this.log("DEBUG", step, `HTTP ${response.statusCode} 继续重定向...`);
+            this.downloadFileWithRedirect(redirectUrl, destPath, step, redirectCount + 1)
               .then(resolve)
               .catch(reject);
             return;

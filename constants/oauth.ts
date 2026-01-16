@@ -45,7 +45,29 @@ export function getApiBaseUrl(): string {
     }
   }
 
-  // Fallback to empty (will use relative URL)
+  // For mobile (iOS/Android), use the Expo manifest to get the debugger host
+  // and derive the API server URL from it
+  if (ReactNative.Platform.OS !== "web") {
+    try {
+      // In development, Expo provides the debugger host
+      // @ts-ignore - __DEV__ is defined by Metro bundler
+      if (typeof __DEV__ !== "undefined" && __DEV__) {
+        // Try to get from Expo Constants
+        const Constants = require("expo-constants").default;
+        const debuggerHost = Constants?.expoConfig?.hostUri || Constants?.manifest?.debuggerHost;
+        if (debuggerHost) {
+          // debuggerHost is like "192.168.1.100:8081" or "sandbox.domain:8081"
+          const host = debuggerHost.split(":")[0];
+          // Replace 8081 with 3000 for API server
+          return `http://${host}:3000`;
+        }
+      }
+    } catch (e) {
+      // Ignore errors, fall through to default
+    }
+  }
+
+  // Fallback to empty (will use relative URL on web, or fail on mobile)
   return "";
 }
 

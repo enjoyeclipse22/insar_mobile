@@ -91,6 +91,27 @@ export default function ProcessingMonitorScreen() {
   // tRPC mutations
   const cancelProcessingMutation = trpc.realInsar.cancelProcessing.useMutation();
 
+  // 尝试从后端获取该项目的最新任务
+  const findTaskForProject = useCallback(async (projId: string) => {
+    try {
+      const apiBase = getApiBaseUrl();
+      const response = await fetch(`${apiBase}/api/trpc/realInsar.listTasks`);
+      const data = await response.json();
+      
+      if (data?.result?.data?.json) {
+        const tasks = data.result.data.json;
+        // 查找该项目的最新任务
+        const projectTask = tasks.find((t: any) => t.projectId.toString() === projId);
+        if (projectTask) {
+          return projectTask.id;
+        }
+      }
+    } catch (error) {
+      console.error("Failed to find task for project:", error);
+    }
+    return null;
+  }, []);
+
   // 加载项目信息
   useEffect(() => {
     const loadProject = async () => {
@@ -108,7 +129,16 @@ export default function ProcessingMonitorScreen() {
         
         // 获取保存的 taskId
         if (!taskId) {
-          const savedTaskId = await AsyncStorage.getItem(`task_${projectId}`);
+          let savedTaskId = await AsyncStorage.getItem(`task_${projectId}`);
+          
+          // 如果本地没有保存的 taskId，尝试从后端获取
+          if (!savedTaskId) {
+            savedTaskId = await findTaskForProject(projectId as string);
+            if (savedTaskId) {
+              await AsyncStorage.setItem(`task_${projectId}`, savedTaskId);
+            }
+          }
+          
           if (savedTaskId) {
             setTaskId(savedTaskId);
           }
